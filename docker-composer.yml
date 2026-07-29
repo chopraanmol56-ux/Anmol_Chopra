@@ -1,1 +1,107 @@
-
+version: "3.9"
+ 
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: docsearch-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-docsearch}
+      POSTGRES_USER: ${POSTGRES_USER:-docsearch}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docsearch}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./ingestion/sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-docsearch}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+ 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: docsearch-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # GPU acceleration (optional) - uncomment if you have the NVIDIA container toolkit installed
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+ 
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: docsearch-phoenix
+    restart: unless-stopped
+    ports:
+      - "6006:6006"   # Phoenix UI
+      - "4317:4317"   # OTLP gRPC collector
+    environment:
+      PHOENIX_PROJECT_NAME: ${PHOENIX_PROJECT_NAME:-document-search-platform}
+ 
+  ingestion:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
+    container_name: docsearch-ingestion
+    profiles: ["tools"]        # not started by `docker compose up`; run explicitly (see README)
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      OLLAMA_BASE_URL: http://ollama:11434
+    volumes:
+      - ./doc/anmol:/app/doc/anmol:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+ 
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: docsearch-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      OLLAMA_BASE_URL: http://ollama:11434
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006/v1/traces
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      phoenix:
+        condition: service_started
+ 
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: docsearch-openwebui
+    restart: unless-stopped
+    ports:
+      - "${OPENWEBUI_PORT:-3000}:8080"
+    environment:
+      OPENAI_API_BASE_URL: ${BACKEND_OPENAI_BASE_URL:-http://backend:8000/v1}
+      OPENAI_API_KEY: not-needed
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-change-me-in-production}
+      ENABLE_OLLAMA_API: "false"
+    volumes:
+      - openwebui_data:/app/backend/data
+    depends_on:
+      - backend
+ 
+volumes:
+  pg_data:
+  ollama_data:
+  openwebui_data:
+ 

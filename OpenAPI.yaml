@@ -1,1 +1,237 @@
+openapi: 3.0.3
+info:
+  title: Document Search Platform API
+  version: "1.0.0"
+  description: >
+    Agentic RAG backend: retrieves relevant chunks from a PGVector knowledge
+    base and orchestrates a CrewAI agent crew (query analysis, retrieval,
+    synthesis, groundedness critique) to answer questions over ingested
+    documents. Includes an OpenAI-compatible /v1/chat/completions endpoint
+    for direct integration with OpenWebUI.
 
+    This file is a static, versioned snapshot for documentation purposes.
+    The live, always-current spec is served by the running backend at
+    GET /openapi.json (interactive UI at GET /docs).
+servers:
+  - url: http://localhost:8000
+    description: Local / docker-compose default
+
+tags:
+  - name: platform
+    description: Native platform endpoints
+  - name: openwebui-compat
+    description: OpenAI-compatible endpoints consumed by OpenWebUI
+
+paths:
+  /:
+    get:
+      tags: [platform]
+      summary: Service info
+      operationId: root
+      responses:
+        "200":
+          description: Basic service metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  docs: { type: string }
+                  openapi: { type: string }
+                  health: { type: string }
+
+  /api/v1/health:
+    get:
+      tags: [platform]
+      summary: Health check
+      description: Verifies connectivity to Postgres and Ollama.
+      operationId: health
+      responses:
+        "200":
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/v1/query:
+    post:
+      tags: [platform]
+      summary: Run the Agentic RAG pipeline for a single question
+      operationId: query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+      responses:
+        "200":
+          description: Generated answer with sources and trace metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryResponse"
+        "500":
+          description: Pipeline execution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/models:
+    get:
+      tags: [openwebui-compat]
+      summary: List available models (OpenAI-compatible)
+      operationId: listModels
+      responses:
+        "200":
+          description: Model list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelListResponse"
+
+  /v1/chat/completions:
+    post:
+      tags: [openwebui-compat]
+      summary: OpenAI-compatible chat completion, backed by the Agentic RAG pipeline
+      description: >
+        Consumed by OpenWebUI (configured as a custom "OpenAI API" connection
+        pointed at this backend's base URL). Only the latest user message is
+        used as the query; `stream: true` is accepted but currently answered
+        as a single non-streamed message.
+      operationId: chatCompletions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: Chat completion response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+        "400":
+          description: No user message provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Pipeline execution failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    SourceChunk:
+      type: object
+      properties:
+        source_file: { type: string, example: handbook.pdf }
+        score: { type: number, format: float, example: 0.873 }
+      required: [source_file, score]
+
+    QueryRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          example: What is the escalation process for a P1 incident?
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 20
+          nullable: true
+      required: [query]
+
+    QueryResponse:
+      type: object
+      properties:
+        answer: { type: string }
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/SourceChunk" }
+        rewritten_query: { type: string }
+        grounded: { type: boolean }
+        iterations: { type: integer }
+        latency_ms: { type: number, format: float }
+        trace_id: { type: string, nullable: true }
+      required: [answer, sources, rewritten_query, grounded, iterations, latency_ms]
+
+    HealthResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        postgres: { type: boolean }
+        ollama: { type: boolean }
+      required: [status, postgres, ollama]
+
+    ChatMessage:
+      type: object
+      properties:
+        role: { type: string, enum: [system, user, assistant] }
+        content: { type: string }
+      required: [role, content]
+
+    ChatCompletionRequest:
+      type: object
+      properties:
+        model: { type: string, example: document-search-agentic-rag }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ChatMessage" }
+        stream: { type: boolean, default: false }
+      required: [model, messages]
+
+    ChatCompletionChoice:
+      type: object
+      properties:
+        index: { type: integer, default: 0 }
+        message: { $ref: "#/components/schemas/ChatMessage" }
+        finish_reason: { type: string, default: stop }
+
+    ChatCompletionUsage:
+      type: object
+      properties:
+        prompt_tokens: { type: integer, default: 0 }
+        completion_tokens: { type: integer, default: 0 }
+        total_tokens: { type: integer, default: 0 }
+
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id: { type: string }
+        object: { type: string, default: chat.completion }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items: { $ref: "#/components/schemas/ChatCompletionChoice" }
+        usage: { $ref: "#/components/schemas/ChatCompletionUsage" }
+
+    ModelInfo:
+      type: object
+      properties:
+        id: { type: string }
+        object: { type: string, default: model }
+        owned_by: { type: string, default: document-search-platform }
+
+    ModelListResponse:
+      type: object
+      properties:
+        object: { type: string, default: list }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ModelInfo" }
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail: { type: string }
